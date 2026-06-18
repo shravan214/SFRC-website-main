@@ -1,0 +1,51 @@
+{
+  "metrics": {
+    "xgb": {
+      "r2": 0.9119978771377323,
+      "rmse": 0.8125556749633397,
+      "mae": 0.5653971527365534
+    },
+    "mlp": {
+      "r2": 0.892089475137083,
+      "rmse": 0.8997843929238715,
+      "mae": 0.6292145636989441
+    },
+    "knn": {
+      "r2": 0.8646324427313858,
+      "rmse": 1.007775624054538,
+      "mae": 0.6057877914756924,
+      "best_k": 11,
+      "best_weights": "distance",
+      "best_metric": "euclidean"
+    }
+  },
+  "features": [
+    "Cementitious material",
+    "Coarse aggregate",
+    "Fine aggregate",
+    "Water dosage",
+    "Superplastizer",
+    "Fiber volume",
+    "Aspect ratio"
+  ],
+  "target": "Flexural strength",
+  "n_samples": 818,
+  "feat_min": [
+    258.0,
+    497.0,
+    488.0,
+    126.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "feat_max": [
+    666.0,
+    1223.0,
+    1065.0,
+    264.0,
+    20.0,
+    2.0,
+    100.0
+  ]
+}
