@@ -426,19 +426,6 @@ if show_xgb:
     show_img("xgboost_structure.jpg",
              "Overview on structure of XGBoost (Extreme Gradient Boosting) model")
     pills("xgb")
-    show_img("XGBoost_scatter.png",
-             "Figure 1a. XGBoost — Actual vs. Predicted (5-fold cross-validation, n=818)",
-             "xgb-sc")
-    st.markdown("""
-    <div class="m-box">
-      <p><b>XGBoost (Extreme Gradient Boosting)</b> is an ensemble tree-based method
-      that sequentially builds decision trees, each correcting the residual errors of the
-      previous ones. It combines gradient boosting with L1/L2 regularisation.</p>
-      <p>The final prediction is a weighted sum of <em>T</em> tree outputs:</p>
-    </div>
-    <div class="eq">ŷ = Σ<sub>t=1</sub><sup>T</sup> f<sub>t</sub>(x)
-      <span class="eqn">(1)</span>
-    </div>""", unsafe_allow_html=True)
 
 # -- 1.2 MLP ------------------------------------------------------------------
 show_mlp = st.checkbox(
@@ -447,19 +434,6 @@ if show_mlp:
     show_img("mlp_diagram.jpg",
              "Overview on structure of Multi-Layer Perceptron (MLP) neural network")
     pills("mlp")
-    show_img("MLP_scatter.png",
-             "Figure 1b. MLP — Actual vs. Predicted (5-fold cross-validation, n=818)",
-             "mlp-sc")
-    st.markdown("""
-    <div class="m-box">
-      <p><b>Multi-Layer Perceptron (MLP)</b> is a feedforward neural network with two
-      hidden layers (100 and 50 neurons, ReLU activation) trained with the Adam optimiser
-      over 1 000 epochs.</p>
-      <p>Each neuron computes: <em>z = ReLU(Wx + b)</em></p>
-    </div>
-    <div class="eq">ŷ = W<sub>out</sub> · ReLU(W<sub>2</sub> · ReLU(W<sub>1</sub>x + b<sub>1</sub>) + b<sub>2</sub>) + b<sub>out</sub>
-      <span class="eqn">(2)</span>
-    </div>""", unsafe_allow_html=True)
 
 # -- 1.3 KNN ------------------------------------------------------------------
 show_knn = st.checkbox(
@@ -468,24 +442,6 @@ if show_knn:
     show_img("knn_diagram.jpg",
              "Overview on structure of k-Nearest Neighbor (KNN) model")
     pills("knn")
-    show_img("KNN_scatter.png",
-             "Figure 1c. KNN — Actual vs. Predicted (5-fold cross-validation, n=818)",
-             "knn-sc")
-    km = METRICS.get("knn", {})
-    best_k = km.get("best_k", "—")
-    best_w = km.get("best_weights", "—")
-    best_m = km.get("best_metric", "—")
-    st.markdown(f"""
-    <div class="m-box">
-      <p><b>k-Nearest Neighbors (KNN)</b> predicts by averaging the targets of the
-      <em>k</em> closest training samples in standardised feature space. Optimal
-      hyper-parameters were chosen via 5-fold grid search.</p>
-      <p>Best configuration: <b>k = {best_k}</b>, weights = <b>{best_w}</b>,
-      metric = <b>{best_m}</b></p>
-    </div>
-    <div class="eq">ŷ = Σ w<sub>i</sub> y<sub>i</sub> / Σ w<sub>i</sub>
-      <span class="eqn">(3)</span>
-    </div>""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SECTION 2 — SHAP Analysis
