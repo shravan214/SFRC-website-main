@@ -1,28 +1,24 @@
 """
-app.py — Streamlit version of the SFRC Flexural Strength Predictor website.
+app.py — Streamlit port of the SFRC Flexural Strength website.
 
-Converts the single-page HTML/JS site into a Streamlit app.
-Models are loaded from the JSON files exported by train_export.py:
-  - xgb_booster.json  (XGBoost native booster)
-  - mlp_model.json    (MLP weights + scaler)
-  - knn_model.json    (KNN training data + scaler + hyper-params)
-  - model_metrics.json (R², RMSE, MAE)
-Images (scatter plots, architecture diagrams, SHAP plot) are loaded from
-the same directory.
+Faithfully reproduces the original HTML/JS site:
+  • Lottie background animation (injected into the parent page from an iframe)
+  • Exact CSS variables & dark theme
+  • Checkbox-driven collapsible sections
+  • Red-accent range sliders
+  • Three result cards (green / blue / amber)
+  • MLP prediction fixed for NumPy 2.x (float(z.flat[0]))
 """
 
 import json
-import math
 import os
 
 import numpy as np
 import streamlit as st
-from PIL import Image
+import streamlit.components.v1 as components
 import xgboost as xgb
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Page config
-# ─────────────────────────────────────────────────────────────────────────────
+# ── page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="ML Models — Predicting Flexural Strength of SFRC",
     page_icon="🏗️",
@@ -30,578 +26,597 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Custom CSS (mirrors the dark theme from the HTML page)
-# ─────────────────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-  /* Google Font */
-  @import url('https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;600;700&display=swap');
-
-  html, body, [class*="css"] {
-    font-family: 'Source Sans Pro', 'Segoe UI', sans-serif;
-  }
-
-  /* Dark background */
-  .stApp {
-    background: #0e1117;
-    color: #fafafa;
-  }
-
-  /* Sidebar */
-  [data-testid="stSidebar"] {
-    background: rgba(38,39,48,0.95);
-    border-right: 1px solid #3a3c4a;
-  }
-  [data-testid="stSidebar"] * {
-    color: #fafafa !important;
-  }
-
-  /* Metric pill style */
-  .metric-pill {
-    display: inline-block;
-    background: #1a1c26;
-    border: 1px solid #3a3c4a;
-    border-radius: 20px;
-    padding: 3px 14px;
-    font-size: 0.82rem;
-    color: #8b92a5;
-    margin: 3px 4px 3px 0;
-  }
-  .metric-pill span {
-    color: #fafafa;
-    font-weight: 700;
-  }
-
-  /* Section headers */
-  h1 { font-size: 1.9rem !important; font-weight: 700 !important; line-height: 1.3 !important; }
-  h2 { font-size: 1.55rem !important; font-weight: 700 !important; color: #fafafa !important; }
-  h3 { font-size: 1rem !important; font-weight: 600 !important; color: #fafafa !important; }
-
-  /* Result card */
-  .result-card {
-    background: #1c1e2e;
-    border: 1px solid #3a3c4a;
-    border-radius: 8px;
-    padding: 16px 20px;
-    text-align: center;
-  }
-  .result-card .label {
-    font-size: 0.72rem;
-    color: #6c7280;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    margin-bottom: 4px;
-  }
-  .result-card .value {
-    font-size: 1.8rem;
-    font-weight: 700;
-    margin-bottom: 2px;
-  }
-  .result-card .unit {
-    font-size: 0.75rem;
-    color: #8b92a5;
-  }
-  .result-card .cv-info {
-    margin-top: 8px;
-    padding-top: 8px;
-    border-top: 1px solid #3a3c4a;
-    font-size: 0.7rem;
-    color: #6c7280;
-    line-height: 1.6;
-  }
-  .result-card .cv-info b { color: #8b92a5; }
-
-  .val-xgb { color: #21c55d; }
-  .val-mlp { color: #3b82f6; }
-  .val-knn { color: #f59e0b; }
-
-  /* Author info */
-  .author-name { font-size: 0.85rem; font-weight: 700; margin-bottom: 2px; }
-  .author-info { font-size: 0.78rem; color: #8b92a5; line-height: 1.55; }
-  .author-info a { color: #4db8ff; text-decoration: none; }
-  .author-info a:hover { text-decoration: underline; }
-  .author-block { margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #3a3c4a; }
-  .author-block:last-child { border-bottom: none; }
-
-  /* Model textbox */
-  .model-box {
-    background: #1a1c26;
-    border: 1px solid #3a3c4a;
-    border-radius: 6px;
-    padding: 16px 20px;
-    font-size: 0.84rem;
-    color: #8b92a5;
-    line-height: 1.75;
-    margin: 8px 0;
-  }
-  .model-box p { margin-bottom: 10px; }
-  .model-box p:last-child { margin-bottom: 0; }
-
-  /* Equation row */
-  .eq-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    font-family: 'Courier New', monospace;
-    font-size: 0.88rem;
-    color: #fafafa;
-    background: rgba(255,255,255,0.06);
-    border-radius: 4px;
-    padding: 8px 16px;
-    margin: 6px 0;
-  }
-  .eq-num { color: #6c7280; font-size: 0.82rem; margin-left: 12px; white-space: nowrap; }
-
-  /* Fig caption */
-  .fig-cap {
-    text-align: center;
-    font-size: 0.8rem;
-    color: #6c7280;
-    margin-top: 4px;
-  }
-
-  /* Sidebar title */
-  .sb-title {
-    font-size: 0.95rem;
-    font-weight: 700;
-    margin-bottom: 12px;
-    padding-bottom: 8px;
-    border-bottom: 1px solid #3a3c4a;
-  }
-
-  /* Hide default Streamlit chrome elements */
-  #MainMenu { visibility: hidden; }
-  footer { visibility: hidden; }
-
-  /* Streamlit slider style overrides */
-  [data-testid="stSlider"] > div > div > div { background: #ff4b4b !important; }
-</style>
-""", unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Paths
-# ─────────────────────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+def asset(name): return os.path.join(BASE_DIR, name)
 
-
-def asset(filename):
-    return os.path.join(BASE_DIR, filename)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Load model data (cached)
-# ─────────────────────────────────────────────────────────────────────────────
+# ── load models (cached) ───────────────────────────────────────────────────────
 @st.cache_resource
 def load_models():
-    """Load and return all model artefacts."""
-    # --- Metrics ---
     with open(asset("model_metrics.json")) as f:
         met = json.load(f)
 
-    # --- XGBoost (native booster) ---
     booster = xgb.Booster()
     booster.load_model(asset("xgb_booster.json"))
 
-    # --- MLP weights ---
     with open(asset("mlp_model.json")) as f:
-        mlp_data = json.load(f)
-    mlp_sm = np.array(mlp_data["scaler_mean"])
-    mlp_ss = np.array(mlp_data["scaler_scale"])
-    mlp_coefs = [np.array(c) for c in mlp_data["coefs"]]
-    mlp_intercepts = [np.array(b) for b in mlp_data["intercepts"]]
+        md = json.load(f)
+    mlp_sm   = np.array(md["scaler_mean"])
+    mlp_ss   = np.array(md["scaler_scale"])
+    mlp_W    = [np.array(c) for c in md["coefs"]]
+    mlp_b    = [np.array(b) for b in md["intercepts"]]
 
-    # --- KNN training data ---
     with open(asset("knn_model.json")) as f:
-        knn_data = json.load(f)
-    knn_sm = np.array(knn_data["scaler_mean"])
-    knn_ss = np.array(knn_data["scaler_scale"])
-    knn_X = np.array(knn_data["X_train_scaled"])
-    knn_y = np.array(knn_data["y_train"])
-    knn_k = int(knn_data["n_neighbors"])
-    knn_weights = knn_data["weights"]
-    knn_metric = knn_data["metric"]
+        kd = json.load(f)
+    knn_sm      = np.array(kd["scaler_mean"])
+    knn_ss      = np.array(kd["scaler_scale"])
+    knn_X       = np.array(kd["X_train_scaled"])
+    knn_y       = np.array(kd["y_train"])
+    knn_k       = int(kd["n_neighbors"])
+    knn_weights = kd["weights"]
+    knn_metric  = kd["metric"]
 
-    return met, booster, mlp_sm, mlp_ss, mlp_coefs, mlp_intercepts, \
-           knn_sm, knn_ss, knn_X, knn_y, knn_k, knn_weights, knn_metric
+    return (met, booster,
+            mlp_sm, mlp_ss, mlp_W, mlp_b,
+            knn_sm, knn_ss, knn_X, knn_y, knn_k, knn_weights, knn_metric)
 
+(met, booster,
+ mlp_sm, mlp_ss, mlp_W, mlp_b,
+ knn_sm, knn_ss, knn_X, knn_y, knn_k, knn_weights, knn_metric) = load_models()
 
-met, booster, mlp_sm, mlp_ss, mlp_coefs, mlp_intercepts, \
-    knn_sm, knn_ss, knn_X, knn_y, knn_k, knn_weights, knn_metric = load_models()
-
-METRICS = met["metrics"]
+METRICS  = met["metrics"]
 FEATURES = met["features"]
 FEAT_MIN = met["feat_min"]
 FEAT_MAX = met["feat_max"]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Prediction helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def relu(x):
-    return np.maximum(0, x)
-
+# ── prediction helpers ─────────────────────────────────────────────────────────
+def relu(x): return np.maximum(0.0, x)
 
 def predict_mlp(x_raw):
-    """Forward pass through MLP (relu hidden layers, linear output)."""
-    z = (np.array(x_raw) - mlp_sm) / mlp_ss
-    for i, (W, b) in enumerate(zip(mlp_coefs, mlp_intercepts)):
+    z = (np.asarray(x_raw, dtype=float) - mlp_sm) / mlp_ss
+    for i, (W, b) in enumerate(zip(mlp_W, mlp_b)):
         z = z @ W + b
-        if i < len(mlp_coefs) - 1:
+        if i < len(mlp_W) - 1:
             z = relu(z)
-    return float(z)
+    # .flat[0] works for any shape in NumPy 2.x (avoids DeprecationError)
+    return float(np.ravel(z)[0])
 
-
-def predict_knn(x_raw, k, weights, metric):
-    """KNN prediction using stored training data."""
-    z = (np.array(x_raw) - knn_sm) / knn_ss
-
-    if metric == "euclidean":
+def predict_knn(x_raw):
+    z = (np.asarray(x_raw, dtype=float) - knn_sm) / knn_ss
+    if knn_metric == "euclidean":
         dists = np.sqrt(np.sum((knn_X - z) ** 2, axis=1))
-    else:  # manhattan
-        dists = np.sum(np.abs(knn_X - z), axis=1)
-
-    idx = np.argsort(dists)[:k]
-    nn_dists = dists[idx]
-    nn_y = knn_y[idx]
-
-    if weights == "distance":
-        # Avoid division by zero for exact matches
-        if np.any(nn_dists == 0):
-            return float(np.mean(nn_y[nn_dists == 0]))
-        w = 1.0 / nn_dists
-        return float(np.average(nn_y, weights=w))
     else:
-        return float(np.mean(nn_y))
-
+        dists = np.sum(np.abs(knn_X - z), axis=1)
+    idx = np.argsort(dists)[:knn_k]
+    nd, ny = dists[idx], knn_y[idx]
+    if knn_weights == "distance":
+        zero = nd == 0
+        if zero.any():
+            return float(np.mean(ny[zero]))
+        w = 1.0 / nd
+        return float(np.average(ny, weights=w))
+    return float(np.mean(ny))
 
 def predict_xgb(x_raw):
-    """XGBoost prediction using native booster."""
-    arr = np.array(x_raw, dtype=np.float32).reshape(1, -1)
-    dm = xgb.DMatrix(arr, feature_names=FEATURES)
+    arr = np.asarray(x_raw, dtype=np.float32).reshape(1, -1)
+    dm  = xgb.DMatrix(arr, feature_names=FEATURES)
     return float(booster.predict(dm)[0])
 
+# ── read Lottie JSON (served from same directory) ──────────────────────────────
+@st.cache_data
+def lottie_json():
+    path = asset("VUI Animation.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            return f.read()
+    return "null"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Sidebar — Author information
-# ─────────────────────────────────────────────────────────────────────────────
+LOTTIE_DATA = lottie_json()
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  GLOBAL CSS  — exact replica of the original HTML stylesheet
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;600;700&display=swap');
+
+/* ── CSS variables ── */
+:root {
+  --bg:#0e1117; --sb:#262730; --text:#fafafa; --dim:#8b92a5;
+  --muted:#6c7280; --accent:#ff4b4b; --link:#4db8ff;
+  --border:#3a3c4a; --card:#1a1c26; --res:#1c1e2e;
+  --trk:#464961;
+  --green:#21c55d; --blue:#3b82f6; --orange:#f59e0b;
+}
+
+/* ── reset & base ── */
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; background: var(--bg) !important; }
+
+html, body, [class*="css"] {
+  font-family: 'Source Sans Pro','Segoe UI',sans-serif !important;
+  color: var(--text) !important;
+}
+
+/* ── app background – transparent so Lottie shows through ── */
+.stApp,
+[data-testid="stAppViewContainer"],
+[data-testid="stMain"],
+[data-testid="stMainBlockContainer"],
+.main .block-container {
+  background: transparent !important;
+}
+
+/* ── Streamlit chrome ── */
+#MainMenu, footer, header,
+[data-testid="stToolbar"],
+[data-testid="stDecoration"],
+[data-testid="stStatusWidget"] { visibility: hidden !important; display: none !important; }
+
+/* ── main content wrapper (mirrors .main in HTML) ── */
+.main .block-container {
+  position: relative;
+  z-index: 1;
+  background: rgba(14,17,23,0.62) !important;
+  padding: 2.5rem 3.5rem 4rem !important;
+  max-width: 900px !important;
+}
+
+/* ── sidebar (mirrors .sb in HTML) ── */
+[data-testid="stSidebar"] {
+  background: rgba(38,39,48,0.82) !important;
+  backdrop-filter: blur(4px) !important;
+  border-right: 1px solid var(--border) !important;
+  z-index: 2 !important;
+}
+[data-testid="stSidebar"] > div:first-child {
+  padding: 1.5rem 1rem 2rem !important;
+}
+[data-testid="stSidebar"] * { color: var(--text) !important; }
+
+/* ── sidebar button (collapse) ── */
+[data-testid="stSidebarCollapseButton"] { display: none !important; }
+
+/* ── page title ── */
+.page-title {
+  font-size: 2rem; font-weight: 700; line-height: 1.3; margin-bottom: 2.5rem;
+}
+
+/* ── section / sub headers ── */
+.sec-hdr  { font-size: 1.65rem; font-weight: 700; margin-top: 2rem; margin-bottom: 1rem; }
+.sub-hdr  { font-size: 1rem;   font-weight: 600; margin: 1.2rem 0 .8rem; }
+
+/* ── metric pills ── */
+.m-banner { display:flex; gap:.6rem; flex-wrap:wrap; margin:.5rem 0 .75rem; }
+.m-pill   { background:var(--card); border:1px solid var(--border); border-radius:20px;
+            padding:.22rem .8rem; font-size:.76rem; color:var(--dim); }
+.m-pill span { color:var(--text); font-weight:700; }
+
+/* ── collapsible (checkbox row) ── */
+.cb-row { display:flex; align-items:center; gap:.55rem; margin:.5rem 0;
+          cursor:pointer; user-select:none; }
+.cb-row input[type=checkbox] {
+  -webkit-appearance:none; appearance:none;
+  width:18px; height:18px; min-width:18px;
+  border:2px solid #555; border-radius:3px;
+  cursor:pointer; position:relative;
+  transition:background .15s,border-color .15s;
+}
+.cb-row input[type=checkbox]:checked { background:var(--accent); border-color:var(--accent); }
+.cb-row input[type=checkbox]:checked::after {
+  content:''; position:absolute; top:2px; left:5px;
+  width:5px; height:9px; border:2px solid #fff;
+  border-top:none; border-left:none; transform:rotate(45deg);
+}
+.cb-txt { font-size:.85rem; color:var(--dim); }
+
+/* ── collapsible body ── */
+.coll { overflow:hidden; max-height:0;
+        transition:max-height .45s cubic-bezier(.4,0,.2,1),
+                   opacity .35s ease, margin .3s ease;
+        opacity:0; }
+.coll.open { max-height:6000px; opacity:1; margin-top:.75rem; }
+.coll-inner { padding-bottom:.8rem; }
+
+/* ── figure ── */
+.fig-wrap { margin:.5rem 0; }
+.fig-img  { width:100%; border-radius:6px; display:block; }
+.fig-cap  { text-align:center; font-size:.8rem; color:var(--muted); margin-top:.4rem; }
+
+/* ── model textbox ── */
+.m-box { background:var(--card); border:1px solid var(--border); border-radius:6px;
+         padding:1.1rem 1.3rem; font-size:.84rem; color:var(--dim);
+         line-height:1.75; margin:.6rem 0; }
+.m-box p { margin-bottom:.7rem; }
+.m-box p:last-child { margin-bottom:0; }
+
+/* ── equation row ── */
+.eq { display:flex; align-items:center; justify-content:space-between;
+      font-family:'Courier New',monospace; font-size:.88rem; color:var(--text);
+      background:rgba(255,255,255,.06); border-radius:4px;
+      padding:.5rem 1rem; margin:.5rem 0; }
+.eqn { color:var(--muted); font-size:.82rem; white-space:nowrap; margin-left:1rem; }
+
+/* ── SHAP wrap ── */
+.shap-wrap { background:var(--card); border:1px solid var(--border);
+             border-radius:8px; padding:1.2rem; margin:.5rem 0; }
+
+/* ── sliders ── */
+.sl-row { margin:.55rem 0; }
+.sl-lbl { font-size:.8rem; color:var(--dim); margin-bottom:1px; }
+.sl-val { font-size:.82rem; color:var(--accent); margin-bottom:4px; min-height:1.1rem; }
+
+/* Streamlit slider overrides */
+[data-testid="stSlider"] > label { font-size:.8rem !important; color:var(--dim) !important; }
+[data-testid="stSlider"] [data-baseweb="slider"] [role="slider"] {
+  background:var(--accent) !important;
+  border-color:var(--accent) !important;
+  box-shadow:0 0 0 3px rgba(255,75,75,.25) !important;
+}
+[data-testid="stSlider"] [data-baseweb="slider"] [role="slider"]:hover {
+  box-shadow:0 0 0 5px rgba(255,75,75,.35) !important;
+}
+
+/* ── predict button ── */
+.pred-btn {
+  display:inline-flex; align-items:center; gap:.4rem;
+  background:transparent; color:var(--text);
+  border:1px solid #555; padding:.38rem 1.1rem;
+  border-radius:5px; cursor:pointer;
+  font-size:.875rem; font-family:inherit; margin-top:1rem;
+  transition:background .2s,border-color .2s,transform .1s;
+}
+.pred-btn:hover  { background:rgba(255,255,255,.08); border-color:#888; }
+.pred-btn:active { transform:scale(.97); }
+
+/* ── result cards ── */
+.r-cards { display:flex; gap:1rem; flex-wrap:wrap; margin-top:.85rem; }
+.r-card  {
+  flex:1; min-width:155px;
+  background:var(--res); border:1px solid var(--border);
+  border-radius:8px; padding:1rem 1.2rem;
+}
+.rc-lbl  { font-size:.72rem; color:var(--muted);
+           text-transform:uppercase; letter-spacing:.06em; margin-bottom:.25rem; }
+.rc-val  { font-size:1.6rem; font-weight:700; }
+.rc-unit { font-size:.75rem; color:var(--dim); margin-top:.1rem; }
+.rc-cv   { margin-top:.5rem; padding-top:.5rem; border-top:1px solid var(--border);
+           font-size:.7rem; color:var(--muted); line-height:1.6; }
+.rc-cv b { color:var(--dim); }
+
+.xgb-val { color:var(--green); }
+.mlp-val { color:var(--blue);  }
+.knn-val { color:var(--orange);}
+
+/* ── loading badge ── */
+.load-badge { display:inline-flex; align-items:center; gap:.45rem; font-size:.82rem;
+              color:var(--muted); padding:.35rem .8rem;
+              background:var(--card); border:1px solid var(--border);
+              border-radius:20px; margin-bottom:.75rem; }
+.spin { display:inline-block; width:13px; height:13px;
+        border:2px solid rgba(255,75,75,.25); border-top-color:var(--accent);
+        border-radius:50%; animation:spin .7s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
+
+/* ── author sidebar ── */
+.sb-title { font-size:.95rem; font-weight:700; margin-bottom:1rem;
+            padding-bottom:.5rem; border-bottom:1px solid var(--border); }
+.a-block  { margin-bottom:1.1rem; }
+.a-name   { font-size:.82rem; font-weight:700; margin-bottom:.3rem; }
+.a-info   { font-size:.75rem; color:var(--dim); line-height:1.55; }
+.a-info a { color:var(--link); text-decoration:none; word-break:break-all; }
+.a-info a:hover { text-decoration:underline; }
+
+/* ── scrollbar ── */
+::-webkit-scrollbar { width:6px; height:6px; }
+::-webkit-scrollbar-thumb { background:#444; border-radius:3px; }
+::-webkit-scrollbar-thumb:hover { background:#666; }
+</style>
+""", unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  LOTTIE BACKGROUND — injected into the parent Streamlit page via iframe JS
+# ══════════════════════════════════════════════════════════════════════════════
+components.html(f"""
+<script>
+(function(){{
+  var pdoc = window.parent.document;
+  if (pdoc.getElementById('sfrc-lottie-bg')) return;   // already injected
+
+  // Create fixed background div behind everything
+  var bg = pdoc.createElement('div');
+  bg.id = 'sfrc-lottie-bg';
+  bg.style.cssText =
+    'position:fixed;top:0;left:0;width:100%;height:100%;' +
+    'z-index:0;pointer-events:none;overflow:hidden;opacity:0.5;';
+  pdoc.body.insertBefore(bg, pdoc.body.firstChild);
+
+  function startAnim(){{
+    var animData = {LOTTIE_DATA};
+    window.parent.lottie.loadAnimation({{
+      container : bg,
+      renderer  : 'svg',
+      loop      : true,
+      autoplay  : true,
+      animationData: animData
+    }});
+  }}
+
+  if (typeof window.parent.lottie !== 'undefined'){{
+    startAnim();
+  }} else {{
+    var s = pdoc.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/bodymovin/5.12.2/lottie.min.js';
+    s.onload = startAnim;
+    pdoc.head.appendChild(s);
+  }}
+}})();
+</script>
+""", height=0)
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SIDEBAR — Authors' information
+# ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.markdown('<div class="sb-title">Authors\' information</div>', unsafe_allow_html=True)
-
+    st.markdown('<div class="sb-title">Authors\' information</div>',
+                unsafe_allow_html=True)
     authors = [
-        {
-            "name": "Archana Tanawade",
-            "dept": "Department of Civil Engineering",
-            "inst": "Vishwakarma Institute of Technology",
-            "email": "archana.tanawade@vit.edu",
-            "orcid": "0000-0001-5923-2242",
-            "orcid_url": "https://orcid.org/0000-0001-5923-2242",
-        },
-        {
-            "name": "Shravan Wable",
-            "dept": "Department of Civil Engineering",
-            "inst": "Vishwakarma Institute of Technology",
-            "email": "shravan.22210618@viit.ac.in",
-            "orcid": "0009-0007-8910-3944",
-            "orcid_url": "https://orcid.org/0009-0007-8910-3944",
-        },
-        {
-            "name": "Srushti Chavhan",
-            "dept": "Department of Civil Engineering",
-            "inst": "Vishwakarma Institute of Technology",
-            "email": "srushti.22210415@viit.ac.in",
-            "orcid": "0009-0008-8045-7487",
-            "orcid_url": "https://orcid.org/0009-0008-8045-7487",
-        },
-        {
-            "name": "Isha Jumale",
-            "dept": "Department of Civil Engineering",
-            "inst": "Vishwakarma Institute of Technology",
-            "email": "isha.22210930@viit.ac.in",
-            "orcid": "0009-0004-6440-3420",
-            "orcid_url": "https://orcid.org/0009-0004-6440-3420",
-        },
-        {
-            "name": "Kartik Kumbhar",
-            "dept": "Department of Civil Engineering",
-            "inst": "Vishwakarma Institute of Technology",
-            "email": "kartik.22110138@viit.ac.in",
-            "orcid": "0009-0002-4518-6358",
-            "orcid_url": "https://orcid.org/0009-0002-4518-6358",
-        },
+        ("Archana Tanawade",  "archana.tanawade@vit.edu",
+         "0000-0001-5923-2242", "https://orcid.org/0000-0001-5923-2242"),
+        ("Shravan Wable",     "shravan.22210618@viit.ac.in",
+         "0009-0007-8910-3944", "https://orcid.org/0009-0007-8910-3944"),
+        ("Srushti Chavhan",   "srushti.22210415@viit.ac.in",
+         "0009-0008-8045-7487", "https://orcid.org/0009-0008-8045-7487"),
+        ("Isha Jumale",       "isha.22210930@viit.ac.in",
+         "0009-0004-6440-3420", "https://orcid.org/0009-0004-6440-3420"),
+        ("Kartik Kumbhar",    "kartik.22110138@viit.ac.in",
+         "0009-0002-4518-6358", "https://orcid.org/0009-0002-4518-6358"),
     ]
-
-    for a in authors:
+    for name, email, orcid, orcid_url in authors:
         st.markdown(f"""
-        <div class="author-block">
-          <div class="author-name">{a['name']}</div>
-          <div class="author-info">
-            {a['dept']}<br>
-            {a['inst']}<br>
-            Email: <a href="mailto:{a['email']}">{a['email']}</a><br>
-            ORCID: <a href="{a['orcid_url']}" target="_blank">{a['orcid']}</a>
+        <div class="a-block">
+          <div class="a-name">{name}</div>
+          <div class="a-info">
+            Department of Civil Engineering<br>
+            Vishwakarma Institute of Technology<br>
+            Email: <a href="mailto:{email}">{email}</a><br>
+            ORCID: <a href="{orcid_url}" target="_blank">{orcid}</a>
           </div>
-        </div>
-        """, unsafe_allow_html=True)
+        </div>""", unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main content
-# ─────────────────────────────────────────────────────────────────────────────
-st.title("Machine learning models-based web application for predicting flexural strength of Steel Fiber-Reinforced Concrete")
+# ══════════════════════════════════════════════════════════════════════════════
+#  MAIN CONTENT
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown(
+    '<h1 class="page-title">Machine learning models-based web application for '
+    'predicting flexural strength of Steel Fiber-Reinforced Concrete</h1>',
+    unsafe_allow_html=True)
 
-# ─── Helper: metric pills ────────────────────────────────────────────────────
-def metric_pills(model_key, label):
-    m = METRICS.get(model_key, {})
-    r2_v   = m.get("r2",   "—")
-    rmse_v = m.get("rmse", "—")
-    mae_v  = m.get("mae",  "—")
-    r2_s   = f"{r2_v:.4f}"   if isinstance(r2_v, float) else str(r2_v)
-    rmse_s = f"{rmse_v:.4f}" if isinstance(rmse_v, float) else str(rmse_v)
-    mae_s  = f"{mae_v:.4f}"  if isinstance(mae_v, float) else str(mae_v)
+# ─── helper: metric pills ─────────────────────────────────────────────────────
+def pills(key):
+    m = METRICS.get(key, {})
+    r2   = f"{m['r2']:.4f}"   if 'r2'   in m else "—"
+    rmse = f"{m['rmse']:.4f}" if 'rmse' in m else "—"
+    mae  = f"{m['mae']:.4f}"  if 'mae'  in m else "—"
     st.markdown(f"""
-    <div style="margin:6px 0 10px;">
-      <span class="metric-pill">R² <span>{r2_s}</span></span>
-      <span class="metric-pill">RMSE <span>{rmse_s} MPa</span></span>
-      <span class="metric-pill">MAE <span>{mae_s} MPa</span></span>
-    </div>
-    """, unsafe_allow_html=True)
+    <div class="m-banner">
+      <span class="m-pill">R² <span>{r2}</span></span>
+      <span class="m-pill">RMSE <span>{rmse} MPa</span></span>
+      <span class="m-pill">MAE <span>{mae} MPa</span></span>
+    </div>""", unsafe_allow_html=True)
 
+# ─── helper: show image + caption safely ─────────────────────────────────────
+def show_img(filename, caption, fig_id=""):
+    p = asset(filename)
+    if os.path.exists(p):
+        extra = f' id="{fig_id}"' if fig_id else ''
+        st.markdown(f'<div class="fig-wrap"{extra}>', unsafe_allow_html=True)
+        st.image(p, use_container_width=True)
+        st.markdown(f'<div class="fig-cap">{caption}</div></div>',
+                    unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Section 1: ML Approaches
-# ─────────────────────────────────────────────────────────────────────────────
-st.header("1. Machine learning approaches")
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECTION 1 — Machine learning approaches
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown('<h2 class="sec-hdr">1. Machine learning approaches</h2>',
+            unsafe_allow_html=True)
 
-# ── 1.1 XGBoost ──
-with st.expander("1.1  Show structure of XGBoost model"):
-    img_path = asset("xgboost_structure.jpg")
-    if os.path.exists(img_path):
-        st.image(img_path, caption="Overview on structure of XGBoost (Extreme Gradient Boosting) model", use_container_width=True)
-    metric_pills("xgb", "XGBoost")
-    sc_path = asset("XGBoost_scatter.png")
-    if os.path.exists(sc_path):
-        st.image(sc_path, caption="Figure 1a. XGBoost — Actual vs. Predicted (5-fold cross-validation, n=818)", use_container_width=True)
-
+# -- 1.1 XGBoost --------------------------------------------------------------
+show_xgb = st.checkbox("1.1 Show structure of XGBoost model", key="cb_xgb")
+if show_xgb:
+    show_img("xgboost_structure.jpg",
+             "Overview on structure of XGBoost (Extreme Gradient Boosting) model")
+    pills("xgb")
+    show_img("XGBoost_scatter.png",
+             "Figure 1a. XGBoost — Actual vs. Predicted (5-fold cross-validation, n=818)",
+             "xgb-sc")
     st.markdown("""
-    <div class="model-box">
-      <p><b>XGBoost (Extreme Gradient Boosting)</b> is an ensemble tree-based method that sequentially builds
-      decision trees, each correcting the residual errors of the previous ones. It combines gradient
-      boosting with L1/L2 regularisation to prevent overfitting.</p>
-      <p>The final prediction is a sum of <em>T</em> tree outputs:</p>
+    <div class="m-box">
+      <p><b>XGBoost (Extreme Gradient Boosting)</b> is an ensemble tree-based method
+      that sequentially builds decision trees, each correcting the residual errors of the
+      previous ones. It combines gradient boosting with L1/L2 regularisation.</p>
+      <p>The final prediction is a weighted sum of <em>T</em> tree outputs:</p>
     </div>
-    """, unsafe_allow_html=True)
+    <div class="eq">ŷ = Σ<sub>t=1</sub><sup>T</sup> f<sub>t</sub>(x)
+      <span class="eqn">(1)</span>
+    </div>""", unsafe_allow_html=True)
+
+# -- 1.2 MLP ------------------------------------------------------------------
+show_mlp = st.checkbox(
+    "1.2 Show structure of MLP (Multi-Layer Perceptron) model", key="cb_mlp")
+if show_mlp:
+    show_img("mlp_diagram.jpg",
+             "Overview on structure of Multi-Layer Perceptron (MLP) neural network")
+    pills("mlp")
+    show_img("MLP_scatter.png",
+             "Figure 1b. MLP — Actual vs. Predicted (5-fold cross-validation, n=818)",
+             "mlp-sc")
     st.markdown("""
-    <div class="eq-row">
-      ŷ = Σ<sub>t=1</sub><sup>T</sup> f<sub>t</sub>(x)
-      <span class="eq-num">(1)</span>
+    <div class="m-box">
+      <p><b>Multi-Layer Perceptron (MLP)</b> is a feedforward neural network with two
+      hidden layers (100 and 50 neurons, ReLU activation) trained with the Adam optimiser
+      over 1 000 epochs.</p>
+      <p>Each neuron computes: <em>z = ReLU(Wx + b)</em></p>
     </div>
-    """, unsafe_allow_html=True)
+    <div class="eq">ŷ = W<sub>out</sub> · ReLU(W<sub>2</sub> · ReLU(W<sub>1</sub>x + b<sub>1</sub>) + b<sub>2</sub>) + b<sub>out</sub>
+      <span class="eqn">(2)</span>
+    </div>""", unsafe_allow_html=True)
 
-# ── 1.2 MLP ──
-with st.expander("1.2  Show structure of MLP (Multi-Layer Perceptron) model"):
-    img_path = asset("mlp_diagram.jpg")
-    if os.path.exists(img_path):
-        st.image(img_path, caption="Overview on structure of Multi-Layer Perceptron (MLP) neural network", use_container_width=True)
-    metric_pills("mlp", "MLP")
-    sc_path = asset("MLP_scatter.png")
-    if os.path.exists(sc_path):
-        st.image(sc_path, caption="Figure 1b. MLP — Actual vs. Predicted (5-fold cross-validation, n=818)", use_container_width=True)
-
-    m = METRICS.get("mlp", {})
-    st.markdown(f"""
-    <div class="model-box">
-      <p><b>Multi-Layer Perceptron (MLP)</b> is a feedforward neural network with two hidden layers
-      (100 and 50 neurons, ReLU activation) trained with the Adam optimiser over 1 000 epochs.</p>
-      <p>Each neuron applies: <em>z = ReLU(Wx + b)</em></p>
-    </div>
-    """, unsafe_allow_html=True)
-
-# ── 1.3 KNN ──
-with st.expander("1.3  Show structure of k-Nearest Neighbor (KNN) model"):
-    img_path = asset("knn_diagram.jpg")
-    if os.path.exists(img_path):
-        st.image(img_path, caption="Overview on structure of k-Nearest Neighbor (KNN) model", use_container_width=True)
-    metric_pills("knn", "KNN")
-    sc_path = asset("KNN_scatter.png")
-    if os.path.exists(sc_path):
-        st.image(sc_path, caption="Figure 1c. KNN — Actual vs. Predicted (5-fold cross-validation, n=818)", use_container_width=True)
-
+# -- 1.3 KNN ------------------------------------------------------------------
+show_knn = st.checkbox(
+    "1.3 Show structure of k-Nearest Neighbor (KNN) model", key="cb_knn")
+if show_knn:
+    show_img("knn_diagram.jpg",
+             "Overview on structure of k-Nearest Neighbor (KNN) model")
+    pills("knn")
+    show_img("KNN_scatter.png",
+             "Figure 1c. KNN — Actual vs. Predicted (5-fold cross-validation, n=818)",
+             "knn-sc")
     km = METRICS.get("knn", {})
     best_k = km.get("best_k", "—")
     best_w = km.get("best_weights", "—")
     best_m = km.get("best_metric", "—")
     st.markdown(f"""
-    <div class="model-box">
-      <p><b>k-Nearest Neighbors (KNN)</b> predicts by averaging the targets of the <em>k</em> closest
-      training samples in feature space. Optimal hyper-parameters were selected via 5-fold grid search.</p>
-      <p>Best configuration: <b>k = {best_k}</b>, weights = <b>{best_w}</b>, metric = <b>{best_m}</b></p>
+    <div class="m-box">
+      <p><b>k-Nearest Neighbors (KNN)</b> predicts by averaging the targets of the
+      <em>k</em> closest training samples in standardised feature space. Optimal
+      hyper-parameters were chosen via 5-fold grid search.</p>
+      <p>Best configuration: <b>k = {best_k}</b>, weights = <b>{best_w}</b>,
+      metric = <b>{best_m}</b></p>
     </div>
-    """, unsafe_allow_html=True)
+    <div class="eq">ŷ = Σ w<sub>i</sub> y<sub>i</sub> / Σ w<sub>i</sub>
+      <span class="eqn">(3)</span>
+    </div>""", unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Section 2: SHAP Analysis
-# ─────────────────────────────────────────────────────────────────────────────
-st.header("2. SHAP Analysis")
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECTION 2 — SHAP Analysis
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown('<h2 class="sec-hdr">2. SHAP Analysis</h2>', unsafe_allow_html=True)
 
-with st.expander("2.1  Show SHAP feature importance (XGBoost)"):
-    shap_path = asset("shap_plot.jpg")
-    if os.path.exists(shap_path):
-        st.markdown("""
-        <div style="background:#1a1c26;border:1px solid #3a3c4a;border-radius:8px;padding:16px;margin:6px 0;">
-        """, unsafe_allow_html=True)
-        st.image(shap_path, use_container_width=True)
-        st.markdown("""
-        <div class="fig-cap">
-          Figure 2. SHAP beeswarm — Impact of each feature on XGBoost model output.<br>
-          Red = high feature value &nbsp;|&nbsp; Blue = low feature value &nbsp;|&nbsp; X-axis = SHAP value (impact on prediction in MPa)
-        </div>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.info("shap_plot.jpg not found in the app directory.")
+show_shap = st.checkbox("2.1 Show SHAP feature importance (XGBoost)", key="cb_shap")
+if show_shap:
+    st.markdown('<div class="shap-wrap">', unsafe_allow_html=True)
+    show_img("shap_plot.jpg", "")
+    st.markdown("""
+    <div class="fig-cap">
+      Figure 2. SHAP beeswarm — Impact of each feature on XGBoost model output.<br>
+      Red = high feature value &nbsp;|&nbsp; Blue = low feature value &nbsp;|&nbsp;
+      X-axis = SHAP value (impact on prediction in MPa)
+    </div></div>""", unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Section 3: Prediction
-# ─────────────────────────────────────────────────────────────────────────────
-st.header("3. Predicting flexural strength of Steel Fiber-Reinforced Concrete")
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECTION 3 — Prediction
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown(
+    '<h2 class="sec-hdr">3. Predicting flexural strength of '
+    'Steel Fiber-Reinforced Concrete</h2>',
+    unsafe_allow_html=True)
 
-st.subheader("Input parameters")
+st.markdown('<div class="load-badge" id="load-badge" style="display:none">'
+            '<span class="spin"></span> Initialising models…</div>'
+            '<div style="display:none" id="load-badge-ready">'
+            '<span style="color:var(--green)">●</span> Models ready</div>',
+            unsafe_allow_html=True)
 
-feat_defaults = {
-    "Cementitious material": 450,
-    "Coarse aggregate":      860,
-    "Fine aggregate":        650,
-    "Water dosage":          185,
-    "Superplastizer":        0.0,
-    "Fiber volume":          0.75,
-    "Aspect ratio":          60,
-}
+st.markdown('<div class="sub-hdr">Input parameters</div>', unsafe_allow_html=True)
 
-feat_steps = {
-    "Cementitious material": 1,
-    "Coarse aggregate":      1,
-    "Fine aggregate":        1,
-    "Water dosage":          1,
-    "Superplastizer":        0.1,
-    "Fiber volume":          0.01,
-    "Aspect ratio":          1,
-}
+# ── slider config ─────────────────────────────────────────────────────────────
+SLIDERS = [
+    ("Cementitious material", "kg/m³",  1.0,  450.0),
+    ("Coarse aggregate",      "kg/m³",  1.0,  860.0),
+    ("Fine aggregate",        "kg/m³",  1.0,  650.0),
+    ("Water dosage",          "kg/m³",  1.0,  185.0),
+    ("Superplastizer",        "%",      0.1,  0.0),
+    ("Fiber volume",          "%",      0.01, 0.75),
+    ("Aspect ratio",          "",       1.0,  60.0),
+]
 
-feat_units = {
-    "Cementitious material": "kg/m³",
-    "Coarse aggregate":      "kg/m³",
-    "Fine aggregate":        "kg/m³",
-    "Water dosage":          "kg/m³",
-    "Superplastizer":        "%",
-    "Fiber volume":          "%",
-    "Aspect ratio":          "(dimensionless)",
-}
+slider_vals = {}
+for i, (feat, unit, step, default) in enumerate(SLIDERS):
+    fi = FEATURES.index(feat)
+    label = f"{feat} ({unit})" if unit else feat
+    val = st.slider(
+        label=label,
+        min_value=float(FEAT_MIN[fi]),
+        max_value=float(FEAT_MAX[fi]),
+        value=float(default),
+        step=float(step),
+        key=f"sl_{feat}",
+    )
+    slider_vals[feat] = val
 
-slider_values = {}
-col1, col2 = st.columns(2)
+# ── predict button + result cards ─────────────────────────────────────────────
+st.markdown('<div class="sub-hdr" style="margin-top:1.8rem">Output parameter</div>',
+            unsafe_allow_html=True)
 
-for i, feat in enumerate(FEATURES):
-    col = col1 if i % 2 == 0 else col2
-    with col:
-        val = col.slider(
-            label=f"{feat}  ({feat_units[feat]})",
-            min_value=float(FEAT_MIN[i]),
-            max_value=float(FEAT_MAX[i]),
-            value=float(feat_defaults.get(feat, (FEAT_MIN[i] + FEAT_MAX[i]) / 2)),
-            step=float(feat_steps.get(feat, 1.0)),
-            key=f"slider_{feat}",
-        )
-        slider_values[feat] = val
+predict_clicked = st.button("Predict", key="pred_btn")
 
-# ─── Predict button ───────────────────────────────────────────────────────────
-st.subheader("Output parameter")
-
-if st.button("⚡  Predict Flexural Strength", type="primary", use_container_width=False):
-    x_raw = [slider_values[f] for f in FEATURES]
-
+if predict_clicked:
+    x_raw = [slider_vals[f] for f in FEATURES]
     with st.spinner("Running models…"):
-        pred_xgb = predict_xgb(x_raw)
-        pred_mlp = predict_mlp(x_raw)
-        pred_knn = predict_knn(x_raw, knn_k, knn_weights, knn_metric)
+        px = predict_xgb(x_raw)
+        pm = predict_mlp(x_raw)
+        pk = predict_knn(x_raw)
 
-    # Retrieve CV metrics
     mx = METRICS.get("xgb", {})
     mm = METRICS.get("mlp", {})
     mk = METRICS.get("knn", {})
+    knn_detail = f"k={mk.get('best_k','—')}, {mk.get('best_weights','')}"
 
-    c1, c2, c3 = st.columns(3)
+    st.markdown(f"""
+    <div class="r-cards">
 
-    with c1:
-        st.markdown(f"""
-        <div class="result-card">
-          <div class="label">XGBoost</div>
-          <div class="value val-xgb">{pred_xgb:.2f}</div>
-          <div class="unit">MPa (Flexural Strength)</div>
-          <div class="cv-info">
-            <b>CV R²</b> {mx.get('r2', '—'):.4f}<br>
-            <b>CV RMSE</b> {mx.get('rmse', '—'):.4f} MPa<br>
-            <b>CV MAE</b> {mx.get('mae', '—'):.4f} MPa
-          </div>
+      <div class="r-card">
+        <div class="rc-lbl">XGBoost</div>
+        <div class="rc-val xgb-val">{px:.4f}</div>
+        <div class="rc-unit">MPa (Flexural Strength)</div>
+        <div class="rc-cv">
+          <b>CV R²</b> {mx.get('r2',0):.4f}<br>
+          <b>CV RMSE</b> {mx.get('rmse',0):.4f} MPa<br>
+          <b>CV MAE</b> {mx.get('mae',0):.4f} MPa
         </div>
-        """, unsafe_allow_html=True)
+      </div>
 
-    with c2:
-        st.markdown(f"""
-        <div class="result-card">
-          <div class="label">MLP (Neural Network)</div>
-          <div class="value val-mlp">{pred_mlp:.2f}</div>
-          <div class="unit">MPa (Flexural Strength)</div>
-          <div class="cv-info">
-            <b>CV R²</b> {mm.get('r2', '—'):.4f}<br>
-            <b>CV RMSE</b> {mm.get('rmse', '—'):.4f} MPa<br>
-            <b>CV MAE</b> {mm.get('mae', '—'):.4f} MPa
-          </div>
+      <div class="r-card">
+        <div class="rc-lbl">MLP (Neural Network)</div>
+        <div class="rc-val mlp-val">{pm:.4f}</div>
+        <div class="rc-unit">MPa (Flexural Strength)</div>
+        <div class="rc-cv">
+          <b>CV R²</b> {mm.get('r2',0):.4f}<br>
+          <b>CV RMSE</b> {mm.get('rmse',0):.4f} MPa<br>
+          <b>CV MAE</b> {mm.get('mae',0):.4f} MPa
         </div>
-        """, unsafe_allow_html=True)
+      </div>
 
-    with c3:
-        knn_lbl_detail = ""
-        if "best_k" in mk:
-            knn_lbl_detail = f"k={mk['best_k']}, {mk.get('best_weights','')}"
-        st.markdown(f"""
-        <div class="result-card">
-          <div class="label">KNN ({knn_lbl_detail})</div>
-          <div class="value val-knn">{pred_knn:.2f}</div>
-          <div class="unit">MPa (Flexural Strength)</div>
-          <div class="cv-info">
-            <b>CV R²</b> {mk.get('r2', '—'):.4f}<br>
-            <b>CV RMSE</b> {mk.get('rmse', '—'):.4f} MPa<br>
-            <b>CV MAE</b> {mk.get('mae', '—'):.4f} MPa
-          </div>
+      <div class="r-card">
+        <div class="rc-lbl">KNN ({knn_detail})</div>
+        <div class="rc-val knn-val">{pk:.4f}</div>
+        <div class="rc-unit">MPa (Flexural Strength)</div>
+        <div class="rc-cv">
+          <b>CV R²</b> {mk.get('r2',0):.4f}<br>
+          <b>CV RMSE</b> {mk.get('rmse',0):.4f} MPa<br>
+          <b>CV MAE</b> {mk.get('mae',0):.4f} MPa
         </div>
-        """, unsafe_allow_html=True)
+      </div>
 
-    st.balloons()
+    </div>""", unsafe_allow_html=True)
 
 else:
-    # Empty placeholders
-    c1, c2, c3 = st.columns(3)
-    for col, label, cls in zip(
-        [c1, c2, c3],
-        ["XGBoost", "MLP (Neural Network)", "KNN"],
-        ["val-xgb", "val-mlp", "val-knn"],
-    ):
-        col.markdown(f"""
-        <div class="result-card">
-          <div class="label">{label}</div>
-          <div class="value {cls}" style="color:#3a3c4a;">—</div>
-          <div class="unit">MPa (Flexural Strength)</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Footer
-# ─────────────────────────────────────────────────────────────────────────────
-st.markdown("---")
-st.markdown(
-    "<div style='text-align:center;color:#464961;font-size:0.8rem;'>"
-    "ML Models — Predicting Flexural Strength of Steel Fiber-Reinforced Concrete &nbsp;·&nbsp; "
-    "Vishwakarma Institute of Technology, Department of Civil Engineering"
-    "</div>",
-    unsafe_allow_html=True,
-)
+    # empty placeholder cards
+    st.markdown("""
+    <div class="r-cards">
+      <div class="r-card">
+        <div class="rc-lbl">XGBoost</div>
+        <div class="rc-val" style="color:#3a3c4a;">—</div>
+        <div class="rc-unit">MPa (Flexural Strength)</div>
+      </div>
+      <div class="r-card">
+        <div class="rc-lbl">MLP (Neural Network)</div>
+        <div class="rc-val" style="color:#3a3c4a;">—</div>
+        <div class="rc-unit">MPa (Flexural Strength)</div>
+      </div>
+      <div class="r-card">
+        <div class="rc-lbl">KNN</div>
+        <div class="rc-val" style="color:#3a3c4a;">—</div>
+        <div class="rc-unit">MPa (Flexural Strength)</div>
+      </div>
+    </div>""", unsafe_allow_html=True)
